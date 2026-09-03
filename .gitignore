@@ -1,5 +1,5 @@
 *__pycache__
-
+.vscode/
 # lcm-gen byproducts. Only the Python bindings and lcm_msgs.jar are tracked.
 src/mujoco_sim/lite6_sim/lcm_msgs/*.class
 src/mujoco_sim/lite6_sim/lcm_msgs/*.java

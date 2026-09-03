@@ -6,8 +6,8 @@ A classroom robotics arm lab using the **UFactory Lite 6** (6-DOF) and **Intel R
 
 1. Clone this repo:
     ```bash
-    git clone https://gitlab.eecs.umich.edu/xssun/armlab-f-26.git
-    cd armlab-f-26
+    git clone https://gitlab.eecs.umich.edu/rob550-f26/armlab-f26.git
+    cd armlab-f26
     ```
 
     > **Note:** The MuJoCo simulation bridge lives in `src/mujoco_sim/`, derived from

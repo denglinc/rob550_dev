@@ -1,0 +1,7 @@
+*__pycache__
+
+# lcm-gen byproducts. Only the Python bindings and lcm_msgs.jar are tracked.
+src/mujoco_sim/lite6_sim/lcm_msgs/*.class
+src/mujoco_sim/lite6_sim/lcm_msgs/*.java
+src/mujoco_sim/lite6_sim/lcm_msgs/*.hpp
+*.egg-info/

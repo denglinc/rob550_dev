@@ -13,7 +13,9 @@ class StateMachine:
         self.status_message = "Idle - waiting for input."
         self.current_state = "idle"
         self.next_state = "idle"
-       
+        self.gripper_state = True
+        self.waypoints =[]
+
         self._handlers = {
             "initial_pose":      self.initial_pose,
             "sleep_arm":         self.sleep_arm,
@@ -28,6 +30,12 @@ class StateMachine:
 
     def set_next_state(self, state):
         self.next_state = state
+
+
+    def set_gripper(self, state , wait = False):
+        if not state:self.arm.close_gripper(wait = wait)
+        else:self.arm.open_gripper(wait = wait)
+        self.gripper_state=state    
 
     def _go_idle(self, message):
         self.status_message = message
@@ -85,7 +93,8 @@ class StateMachine:
         # (e.g. WP: arm at grasp position, gripper open -> next WP: same position, gripper closed).
         # Playback executes each waypoint sequentially: move joints first, then apply gripper state.
         # self._go_idle("Student lab: implement add_waypoint() - record joint angles + gripper state.")
-        self.waypoints.append({'q': self.arm.get_joint_angles(),'gripper': True})
+        self.waypoints.append((self.arm.get_joint_angles(),self.gripper_state))
+        print(self.waypoints[-1])
         self._go_idle(f"{len(self.waypoints)} waypoints")
         
 
@@ -99,8 +108,13 @@ class StateMachine:
         # TODO: student lab
         # For each waypoint: move to joint angles (wait), then apply gripper state (wait), then advance.
         self._go_idle("Student lab: implement playback_waypoints() - replay waypoints in order.")
-        for point in self.waypoints:
-            self.arm.set_joint_angles(waypoints['q'])
+        for i in range(len(self.waypoints)):
+            print(f"waypoint number :{i}  waypoints location and gripper state {self.waypoints[i]}")
+            self.arm.set_joint_angles(self.waypoints[i][0])
+            time.sleep(3)
+            self.set_gripper(self.waypoints[i][1])
+            time.sleep(3)
+            
 
     def pick_place(self):
         # TODO: student lab

@@ -104,17 +104,42 @@ class StateMachine:
         self._go_idle("Student lab: implement clear_waypoints() - erase all recorded waypoints.")
         self.waypoints =[]
 
+    def wait_until_reached(self, target_angles, tolerance = 0.05,maxTime=15.0):
+        deadline = time.time()+maxTime
+        while time.time()<deadline:
+            acutal_angles = self.arm.get_joint_angles()
+            for i in range(len(acutal_angles)):
+                sum=0
+                sum+= (acutal_angles[i]-target_angles[i])**2
+            if sum<tolerance:
+                print('reached')
+                return True
+            time.sleep(0.05)
+        print(sum)
+        return False
+
+    def move_to(self,joint_angles):
+        print(f"moving to {joint_angles}")
+        self.arm.set_joint_angles(joint_angles)
+        wait_until_reached(self,joint_angles)
+        return True
+
     def playback_waypoints(self):
         # TODO: student lab
         # For each waypoint: move to joint angles (wait), then apply gripper state (wait), then advance.
-        self._go_idle("Student lab: implement playback_waypoints() - replay waypoints in order.")
+        #self._go_idle("Student lab: implement playback_waypoints() - replay waypoints in order.")
+        if not self.waypoints:return
+
+        self.current_state = "playback waypoints"
         for i in range(len(self.waypoints)):
-            print(f"waypoint number :{i}  waypoints location and gripper state {self.waypoints[i]}")
-            self.arm.set_joint_angles(self.waypoints[i][0])
-            time.sleep(3)
-            self.set_gripper(self.waypoints[i][1])
-            time.sleep(3)
-            
+            Nwaypoint = self.waypoints[i]
+            angles =Nwaypoint[0]
+            grip = Nwaypoint[1]
+            if not self.move_to(angles):
+                self._go_idle("waypoint not reached")
+            self.set_gripper(self.gripper_state,wait =True)
+        self._go_idle("playback complete")
+
 
     def pick_place(self):
         # TODO: student lab

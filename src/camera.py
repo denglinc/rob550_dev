@@ -24,10 +24,10 @@ WORKSPACE_MARGIN_MM = 50.0
 # Students can adjust these for their physical station.
 # TODO: student lab - adjust thest to match new workspace tag locations.
 TAG_WORLD_POINTS = {
-    1: (0.0,  250.0, 0.0),
-    2: (0.0, -250.0, 0.0),
-    3: (300.0, -250.0, 0.0),
-    4: (300.0, 250.0, 0.0),
+    1: (100.0,  300.0, 0.0),   # near the robot, robot's left
+    2: (100.0, -300.0, 0.0),   # near the robot, robot's right
+    3: (400.0, -300.0, 0.0),   # far side, robot's right
+    4: (400.0,  300.0, 0.0),   # far side, robot's left
 }
 
 class Camera:
@@ -147,7 +147,21 @@ class Camera:
 
     def draw_tags_in_rgb_image(self):
         # TODO: student lab
-        self.tag_image_frame = self.video_frame.copy()
+        # Draw each detected AprilTag on a copy of the RGB frame: outline, center,
+        # its ID and (if known) its world coordinates from TAG_WORLD_POINTS.
+        frame = self.video_frame.copy()
+        for tag in self.tag_detections:
+            corners = tag.corners.astype(int)            # 4 x 2 pixel corners
+            cv2.polylines(frame, [corners], True, (0, 255, 0), 2)
+            u, v = int(tag.center[0]), int(tag.center[1])
+            cv2.circle(frame, (u, v), 4, (255, 0, 0), -1)
+            label = f"id {tag.tag_id}"
+            if tag.tag_id in self.tag_world_points:
+                x, y, _ = self.tag_world_points[tag.tag_id]
+                label += f" ({x:.0f}, {y:.0f})"
+            cv2.putText(frame, label, (u + 10, v - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        self.tag_image_frame = frame
 
     def estimate_extrinsics_from_tags(self):
         """

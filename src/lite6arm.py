@@ -1,6 +1,7 @@
 """
 Lite 6 arm wrapper around the xArm Python SDK.
 """
+import threading
 import time
 
 import numpy as np
@@ -31,7 +32,8 @@ JOINT_NAMES = ("Base", "Shoulder", "Elbow", "F.Roll", "W.Pitch", "W.Roll")
 LCM_STATE_CHANNEL = "ufactory_lite6_state"  # must match mujoco_sim bridge.topic_state
 LCM_URL = "udpm://239.255.76.67:7667?ttl=0"  # ttl=0: stays on this host, so stations do not cross-talk
 
-GRIPPER_DWELL_S = 0.8  # Gripper Lite (LG-1000) has no feedback; dwell to let it finish actuating
+GRIPPER_DWELL_S = 2.0  # Gripper Lite (LG-1000) has no feedback; time to let it finish actuating
+                       # (also when the motor is switched off after an open)
 
 class Lite6Arm:
     """Wrapper around XArmAPI for the UFactory Lite 6."""
@@ -45,6 +47,11 @@ class Lite6Arm:
         self.dh_params = None
         self.speed_pct = 20.0
         self.mvacc_rad_s2 = 10.0
+        # Last commanded gripper state. The Gripper Lite has no feedback, so this
+        # is the only record of whether it is open or closed. Set by
+        # open_gripper() / close_gripper(); read by the state machine when it
+        # records a waypoint.
+        self.gripper_closed = False
         self.xarm = None
 
         try:
@@ -98,16 +105,18 @@ class Lite6Arm:
 
     # --- Motion ---
 
-    def set_joint_angles(self, joint_angles_rad):
+    def set_joint_angles(self, joint_angles_rad, wait=False):
         # Send all 6 joint angles (rad) as a non-blocking move.
+        # Student lab: wait=True blocks until the move completes instead; returns True on success.
         if not self.connected or not self.initialized:
-            return
-        self.xarm.set_servo_angle(
+            return False
+        code = self.xarm.set_servo_angle(
             angle=joint_angles_rad,
             speed=self.speed_pct / 100.0 * np.pi,
             mvacc=self.mvacc_rad_s2,
-            wait=False,
+            wait=wait,
         )
+        return code == 0
 
     def enter_jog_mode(self):
         # Switch to velocity control once when direct control is enabled.
@@ -191,14 +200,27 @@ class Lite6Arm:
 
     def open_gripper(self, wait=False, sync=True):
         # Open the Lite 6 Gripper Lite (LG-1000).
-        # Binary open/close only, no position feedback. sync=False actuates immediately in velocity mode
+        # Binary open/close only, no position feedback. sync=False actuates immediately in velocity mode.
+        # The motor keeps driving until stop_gripper() is called, so every open
+        # schedules a stop GRIPPER_DWELL_S later (an open gripper has nothing to
+        # hold). A close is left driving on purpose so it keeps holding the object.
         if not self.connected:
             return
         code = self.xarm.open_lite6_gripper(sync=sync)
         if code != 0:
             print(f"WARNING: open_lite6_gripper failed (code={code})")
-        elif wait:
+            return
+        self.gripper_closed = False   # remember the commanded state (no gripper feedback)
+        if wait:
             time.sleep(GRIPPER_DWELL_S)
+            self._stop_gripper_if_open()
+        else:
+            threading.Timer(GRIPPER_DWELL_S, self._stop_gripper_if_open).start()
+
+    def _stop_gripper_if_open(self):
+        # Switch the gripper motor off after an open, unless a close came in meanwhile.
+        if not self.gripper_closed:
+            self.stop_gripper()
 
     def close_gripper(self, wait=False, sync=True):
         # Close (grip) the Lite 6 Gripper Lite.
@@ -207,7 +229,9 @@ class Lite6Arm:
         code = self.xarm.close_lite6_gripper(sync=sync)
         if code != 0:
             print(f"WARNING: close_lite6_gripper failed (code={code})")
-        elif wait:
+            return
+        self.gripper_closed = True    # remember the commanded state (no gripper feedback)
+        if wait:
             time.sleep(GRIPPER_DWELL_S)
 
     def stop_gripper(self, sync=True):

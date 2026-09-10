@@ -4,17 +4,32 @@ State machine for the arm lab runtime shell.
 import math
 import time
 
+import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal
 
-try:
-    from lite6arm import GRIPPER_DWELL_S
-except Exception:
-    GRIPPER_DWELL_S = 0.8
+from kinematics import Q_DEFAULT_DEG
+from lite6arm import GRIPPER_DWELL_S
 
 JOINT_TOL_RAD = 0.02       # per-joint arrival tolerance
 MOVE_TIMEOUT_S = 15.0      # give up on a move after this long
+WAYPOINT_PAUSE_S = 1.0     # settle time at each waypoint before the gripper acts
 APPROACH_MM = 60.0         # hover height above a grasp / drop point
 VERTICAL_RPY = (math.pi, 0.0, 0.0)  # tool pointing straight down
+
+# Task 1.3 demo routine: (joint angles in degrees, gripper_closed) per waypoint,
+# converted to radians below. Starts and ends at the home pose.
+HOME_DEG = list(Q_DEFAULT_DEG)            # [0, 9.9, 31.8, 0, 21.9, 0]
+ROUTINE_DEG = [
+    (HOME_DEG,                        False),
+    ([ 45,  15, 40,   0, 30,   0],    False),   # turn left, lean forward
+    ([ 45,   0, 70,   0, 60,   0],    True),    # curl the forearm in, close gripper
+    ([-45,   0, 70,   0, 60,   0],    True),    # sweep to the right (gripper stays closed)
+    ([-45,  15, 40,  45, 30, -45],    False),   # lean forward, twist wrist, open gripper
+    ([  0,  15, 40, -45, 30,  45],    False),   # centre, twist the other way
+    ([  0, -10, 60,   0, 80,   0],    False),   # lean back, wrist up
+    (HOME_DEG,                        False),
+]
+ROUTINE = [(np.radians(q).tolist(), closed) for q, closed in ROUTINE_DEG]
 
 
 class StateMachine:
@@ -26,15 +41,12 @@ class StateMachine:
         self.current_state = "idle"
         self.next_state = "idle"
 
-        # --- waypoint teach/playback ---
-        self.waypoints = []           # [(joint_angles_rad, gripper_closed), ...]
-        self.gripper_closed = False   # commanded gripper state (no feedback on the LG-1000)
-        self._pb_idx = 0
-        self._pb_phase = "move"
-        self._pb_t0 = 0.0
+        # Waypoints: [(joint_angles_rad, gripper_closed), ...]. Starts loaded with
+        # the Task 1.3 routine; the first Add Waypoint (or Clear All) discards it.
+        self.waypoints = list(ROUTINE)
+        self._routine_loaded = True
 
-        # --- pick & place ---
-        self._holding = False
+        self._holding = False   # pick & place: currently carrying an object
 
         self._handlers = {
             "initial_pose":      self.initial_pose,
@@ -100,32 +112,22 @@ class StateMachine:
         _, message = self.camera.estimate_extrinsics_from_tags()
         self._go_idle(message)
 
-    # ------------------------------------------------------------------
-    # Gripper bookkeeping
-    # ------------------------------------------------------------------
-
     def set_gripper(self, closed):
-        """
-        Drive the gripper AND remember the commanded state.
-
-        The LG-1000 has no position feedback, so the only way a waypoint can
-        store a gripper state is if every open/close goes through here. Wire the
-        GUI's gripper buttons to this instead of calling arm.open/close_gripper.
-        """
-        if not self.arm.connected:
-            return
+        # Open or close the gripper, then wait for it to finish. It has no feedback,
+        # so the wait is a fixed time (GRIPPER_DWELL_S from lite6arm.py; after an
+        # open the arm also switches the gripper motor off at that time).
         if closed:
             self.arm.close_gripper()
         else:
             self.arm.open_gripper()
-        self.gripper_closed = bool(closed)
-
-    # ------------------------------------------------------------------
-    # Waypoints
-    # ------------------------------------------------------------------
+        time.sleep(GRIPPER_DWELL_S)
 
     def add_waypoint(self):
-        """Record current joint angles + gripper state as one waypoint."""
+        # TODO: student lab
+        # Each waypoint stores joint angles + gripper state together.
+        # Two consecutive waypoints can have identical joint angles but different gripper states
+        # (e.g. WP: arm at grasp position, gripper open -> next WP: same position, gripper closed).
+        # Playback executes each waypoint sequentially: move joints first, then apply gripper state.
         if not self.arm.connected:
             self._go_idle("Arm offline - cannot record a waypoint.")
             return
@@ -135,83 +137,106 @@ class StateMachine:
             self._go_idle("Could not read joint angles - waypoint not recorded.")
             return
 
-        self.waypoints.append((list(angles), self.gripper_closed))
-        grip = "closed" if self.gripper_closed else "open"
+        # First Add Waypoint replaces the preloaded routine (no need to click Clear All).
+        if self._routine_loaded:
+            self.waypoints = []
+            self._routine_loaded = False
+            print("Preloaded routine discarded - recording your own waypoints now.")
+
+        # No gripper feedback: arm.gripper_closed is the last commanded state,
+        # set by arm.open_gripper() / arm.close_gripper() (the GUI buttons call these).
+        closed = self.arm.gripper_closed
+        self.waypoints.append((list(angles), closed))
+        self._print_waypoint(len(self.waypoints), angles, closed)
+        grip = "closed" if closed else "open"
         self._go_idle(f"Waypoint {len(self.waypoints)} recorded (gripper {grip}).")
 
     def clear_waypoints(self):
-        """Erase all recorded waypoints."""
+        # TODO: student lab
         count = len(self.waypoints)
         self.waypoints = []
-        self._pb_idx = 0
-        self._pb_phase = "move"
+        self._routine_loaded = False
         self._go_idle(f"Cleared {count} waypoint(s).")
 
     def playback_waypoints(self):
-        """
-        Replay waypoints in order: move joints, wait for arrival, apply the
-        gripper state, dwell, advance.
-
-        Written as one step per run() tick rather than a blocking loop so the
-        status message keeps updating and the GUI can preempt with STOP.
-        """
+        # TODO: student lab
+        # For each waypoint: move to joint angles (wait), then apply gripper state (wait), then advance.
+        # Blocking loop: the GUI status only refreshes when this returns, so progress is
+        # printed to the terminal. STOP still works because _wait_for_arrival watches for it.
         if not self.arm.connected or not self.arm.initialized:
             self._go_idle("Playback unavailable until the arm is initialized.")
             return
         if not self.waypoints:
-            self._go_idle("No waypoints recorded - nothing to play back.")
+            self._go_idle("No waypoints - record some (or restart the GUI to reload the routine).")
             return
 
-        # First tick of this state: reset progress and leave velocity mode,
-        # since set_servo_angle only works in position mode (mode 0).
-        if self.current_state != "playback_waypoints":
-            self.arm.enable()
-            self.current_state = "playback_waypoints"
-            self._pb_idx = 0
-            self._pb_phase = "move"
-
-        if self.arm.has_fault():
-            self._go_idle("Arm fault during playback - stopped.")
-            return
+        # Check every waypoint against the joint limits before moving at all.
+        for i, (angles, _closed) in enumerate(self.waypoints, 1):
+            if not self._within_limits(angles):
+                self._go_idle(f"Playback refused: waypoint {i} is outside the joint limits.")
+                return
 
         total = len(self.waypoints)
-        angles, gripper_closed = self.waypoints[self._pb_idx]
+        print(f"--- Playback: {total} waypoints ---")
+        self._print_waypoints(self.waypoints)
 
-        if self._pb_phase == "move":
-            self.status_message = f"Playback: moving to waypoint {self._pb_idx + 1}/{total}..."
-            self.arm.set_joint_angles(angles)
-            self._pb_t0 = time.time()
-            self._pb_phase = "wait_move"
+        self.current_state = "playback_waypoints"
+        self.arm.enable()   # set_joint_angles needs position mode (mode 0)
 
-        elif self._pb_phase == "wait_move":
-            if self._at_target(angles):
-                self._pb_phase = "gripper"
-            elif time.time() - self._pb_t0 > MOVE_TIMEOUT_S:
-                self._go_idle(f"Playback timed out reaching waypoint {self._pb_idx + 1}.")
+        prev_closed = None  # gripper state of the previous waypoint; None = none yet
+        for i, (angles, closed) in enumerate(self.waypoints, 1):
+            print(f"Playback: moving to waypoint {i}/{total}")
+            if not self.arm.set_joint_angles(angles):
+                self._go_idle(f"Playback stopped: move command for waypoint {i} failed.")
+                return
+            if not self._wait_for_arrival(angles):
+                if self.next_state == "estop":
+                    # STOP was pressed: leave next_state alone so estop() runs next tick.
+                    self.current_state = "idle"
+                    return
+                self._go_idle(f"Playback stopped: did not reach waypoint {i} (fault or timeout).")
+                return
 
-        elif self._pb_phase == "gripper":
-            grip = "closing" if gripper_closed else "opening"
-            self.status_message = f"Playback: {grip} gripper at waypoint {self._pb_idx + 1}/{total}..."
-            self.set_gripper(gripper_closed)
-            self._pb_t0 = time.time()
-            self._pb_phase = "wait_gripper"
+            # Arrived: pause so the arm settles, then apply the gripper state stored
+            # with this waypoint (set_gripper waits for the gripper too). Skip it
+            # when the state is the same as at the previous waypoint; the first
+            # waypoint always actuates so the gripper starts in a known state.
+            time.sleep(WAYPOINT_PAUSE_S)
+            grip = "close" if closed else "open"
+            if closed == prev_closed:
+                print(f"Playback: gripper already {grip} at waypoint {i}/{total} - no action")
+            else:
+                print(f"Playback: gripper {grip} at waypoint {i}/{total}")
+                self.set_gripper(closed)
+            prev_closed = closed
 
-        elif self._pb_phase == "wait_gripper":
-            if time.time() - self._pb_t0 >= GRIPPER_DWELL_S:
-                self._pb_idx += 1
-                self._pb_phase = "move"
-                if self._pb_idx >= total:
-                    self._go_idle(f"Playback complete ({total} waypoints).")
+        self._go_idle(f"Playback complete ({total} waypoints).")
 
-    # ------------------------------------------------------------------
-    # Pick & place
-    # ------------------------------------------------------------------
+    def _within_limits(self, angles):
+        # True when every joint angle (rad) is inside the arm's joint limits.
+        if len(angles) != len(self.arm.joint_limits):
+            return False
+        return all(lo <= a <= hi for a, (lo, hi) in zip(angles, self.arm.joint_limits))
+
+    def _print_waypoint(self, index, angles, gripper_closed):
+        # One table row: index, six joint angles in degrees, gripper state.
+        deg = ", ".join(f"{math.degrees(a):7.2f}" for a in angles)
+        grip = "closed" if gripper_closed else "open"
+        print(f"WP {index:2d} | {deg} | gripper {grip}")
+
+    def _print_waypoints(self, waypoints):
+        print("WP    | base, shoulder, elbow, forearm roll, wrist pitch, wrist roll (deg) | gripper")
+        for i, (angles, closed) in enumerate(waypoints, 1):
+            self._print_waypoint(i, angles, closed)
 
     def pick_place(self):
-        """
-        Click an object in the video feed to pick it up, then click a
-        destination to drop it. Stays active until the GUI toggle is cleared.
-        """
+        # TODO: student lab
+        # Student lab: click an object in the video feed to pick it up and place it.
+        # 1. Poll camera.new_click; when True, read camera.last_click for pixel (u, v).
+        # 2. camera.image_to_world(u, v) -> world XYZ using live depth + extrinsics.
+        # 3. arm.get_ik(pose) -> joint angles; arm.set_joint_angles(...) to move above object.
+        # 4. arm.close_gripper() to grasp, move to drop position, arm.open_gripper().
+        # State persists until the GUI toggle is unchecked.
         if not self.arm.connected or not self.arm.initialized:
             self._go_idle("Pick & place unavailable until the arm is initialized.")
             return
@@ -249,7 +274,7 @@ class StateMachine:
                 self.status_message = "Place failed - click the destination again."
 
     def _visit(self, world_xyz, close_gripper):
-        """Approach from above, descend, actuate the gripper, retreat."""
+        # Approach from above, descend, actuate the gripper, retreat.
         x, y, z = world_xyz[0], world_xyz[1], world_xyz[2]
         above = [x, y, z + APPROACH_MM, *VERTICAL_RPY]
         at = [x, y, z, *VERTICAL_RPY]
@@ -260,12 +285,11 @@ class StateMachine:
             return False
 
         self.set_gripper(close_gripper)
-        time.sleep(GRIPPER_DWELL_S)
 
         return self._move_to_pose(above)
 
     def _move_to_pose(self, pose):
-        """Solve IK for a Cartesian pose and move there, blocking until arrival."""
+        # Solve IK for a Cartesian pose and move there, blocking until arrival.
         angles = self.arm.get_ik(pose)
         if angles is None:
             angles = self.arm.get_ik_numerical(pose)
@@ -277,7 +301,7 @@ class StateMachine:
         return self._wait_for_arrival(angles)
 
     def _wait_for_arrival(self, target, timeout=MOVE_TIMEOUT_S):
-        """Block until the arm reaches target, bailing out on STOP or fault."""
+        # Block until the arm reaches target, bailing out on STOP, fault or timeout.
         t0 = time.time()
         while time.time() - t0 < timeout:
             if self.next_state == "estop" or self.arm.has_fault():
@@ -288,7 +312,7 @@ class StateMachine:
         return False
 
     def _at_target(self, target):
-        """True when every joint is within tolerance of the target angles."""
+        # True when every joint is within tolerance of the target angles.
         current = self.arm.joint_angles
         if current is None or len(current) < len(target):
             return False

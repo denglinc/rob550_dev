@@ -57,6 +57,8 @@ MODE_CART_VEL = 2    # velocity IK on v_ee (Cartesian jog)
 CART_JOG_LIN_MM_S = 150.0
 CART_JOG_ROT_RAD_S = 1.0
 
+REACHED_TOL_RAD = 0.02  # Student lab: every joint within ~1 deg counts as arrived (set_joint_angles wait=True)
+
 
 class SimArm:
     """Simulation arm interface; drives the MuJoCo sim over LCM."""
@@ -72,6 +74,9 @@ class SimArm:
         self.dh_params = DH_STD  # standard Lite 6 DH table (sim has no firmware to query)
         self.speed_pct = 20.0
         self.mvacc_rad_s2 = 10.0
+        # Last commanded gripper state (same attribute as Lite6Arm; the sim gripper
+        # is not modeled, but the state machine records this in each waypoint).
+        self.gripper_closed = False
 
         # Direct-control (jog) state: per-joint velocity target (rad/s) streamed in velocity mode while a jog button is held.
         self._jog_active = False
@@ -227,13 +232,27 @@ class SimArm:
 
     # --- Motion ---
 
-    def set_joint_angles(self, joint_angles_rad):
+    def set_joint_angles(self, joint_angles_rad, wait=False):
         # Send all 6 joint angles (rad) to the sim as a speed/accel-limited servo move.
+        # Student lab: wait=True blocks until the sim arm arrives; returns True on success.
         if not (self.connected and self.initialized):
-            return
+            return False
         self._jog_active = False
         self._send_control(qj_pos=joint_angles_rad, mode=MODE_POSITION,
                            speed=self._speed_rad_s(), mvacc=self.mvacc_rad_s2)
+        return self._wait_until_reached(joint_angles_rad) if wait else True
+
+    def _wait_until_reached(self, q_target):
+        # Student lab: the sim has no "motion done" signal, so poll the state until every joint is close.
+        # Allow the time the move needs at the current speed (x2 for accel/decel) plus a margin.
+        travel = max(abs(a - b) for a, b in zip(q_target, self.joint_angles))
+        deadline = time.time() + 3.0 + 2.0 * travel / max(self._speed_rad_s(), 1e-3)
+        while time.time() < deadline:
+            q = self.get_joint_angles()
+            if q is not None and max(abs(a - b) for a, b in zip(q, q_target)) < REACHED_TOL_RAD:
+                return True
+            time.sleep(0.05)
+        return False
 
     # --- joint velocity (jog) mode: stream a velocity command the bridge integrates ---
     def enter_jog_mode(self):
@@ -327,10 +346,10 @@ class SimArm:
     # --- Gripper (stubs - sim gripper not modeled yet) ---
 
     def open_gripper(self, wait=False, sync=True):
-        pass  # NOTE: Unimplemented
+        self.gripper_closed = False   # gripper not modeled; just remember the command
 
     def close_gripper(self, wait=False, sync=True):
-        pass  # NOTE: Unimplemented
+        self.gripper_closed = True    # gripper not modeled; just remember the command
 
     def stop_gripper(self, sync=True):
         pass  # NOTE: Unimplemented
